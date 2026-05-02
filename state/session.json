@@ -1,0 +1,47 @@
+{
+  "agent": "REDOPS",
+  "version": "2.0.0",
+  "mode": null,
+  "persona": null,
+  "session_id": null,
+  "engagement": {
+    "name": null,
+    "type": null,
+    "client": null,
+    "start_date": null,
+    "end_date": null,
+    "authorization": null
+  },
+  "targets": [],
+  "active_target": null,
+  "phase": "IDLE",
+  "phases_completed": [],
+  "iteration": 0,
+  "findings": {
+    "open_ports": [],
+    "services": {},
+    "subdomains": [],
+    "web_paths": [],
+    "credentials": [],
+    "vulnerabilities": [],
+    "exploits_tried": [],
+    "ttps_executed": []
+  },
+  "bug_bounty": {
+    "program": null,
+    "program_url": null,
+    "submissions": [],
+    "total_bounty": 0
+  },
+  "red_team": {
+    "objectives": [],
+    "c2_active": false,
+    "persistence": [],
+    "lateral_hosts": []
+  },
+  "flags": {},
+  "scope_checks": [],
+  "wiki_pages": [],
+  "last_command": null,
+  "last_output_file": null
+}
